@@ -186,7 +186,7 @@ export class CoreEngine {
                                             color: "666666",
                                         }),
                                     ],
-                                    alignment: AlignmentType.CENTER,
+                                    alignment: AlignmentType.LEFT,
                                 }),
                             ],
                         }),
