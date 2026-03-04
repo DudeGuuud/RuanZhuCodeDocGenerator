@@ -2,6 +2,7 @@
 
 import React, { useState, useRef } from "react";
 import { CoreEngine, CleanOptions, PROJECT_TEMPLATES, ProjectTemplate } from "@/lib/engine";
+import { WorkerPool } from "@/lib/worker-pool";
 import {
   ShieldCheck,
   FileCode,
@@ -138,32 +139,44 @@ export default function Home() {
       framework: selectedTemplate.framework,
     };
 
+    // 创建 Worker 池：大小 = CPU 核数，上限 8
+    const concurrency = Math.min(navigator.hardwareConcurrency ?? 4, 8);
+    const pool = new WorkerPool(concurrency);
+
     try {
       const allLines: string[] = [];
       const fileList = Array.from(files);
+
+      // 路径过滤：预编译正则 O(1)
       const filteredFiles = fileList.filter(file => {
         const path = file.webkitRelativePath.toLowerCase();
-        // 用预编译正则替代 O(Files × Patterns) 的 some+includes 线性扫描
         return !selectedTemplate.excludeRegex.test(path);
       });
 
-      const totalFiles = filteredFiles.length;
+      // 扩展名过滤：指定扩展名的文件才分发给 Worker
+      const codeFiles = filteredFiles.filter(file => {
+        const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+        return selectedTemplate.extensionSet.has(ext); // O(1) Set 查找
+      });
+
+      const totalFiles = codeFiles.length;
       setFileCount(totalFiles);
 
-      for (let i = 0; i < totalFiles; i++) {
-        const file = filteredFiles[i];
-        const ext = file.name.split(".").pop()?.toLowerCase();
+      // 分批并行：每批 = 并发数，避免一次性把全部文件装进内存
+      for (let i = 0; i < totalFiles; i += concurrency) {
+        const batch = codeFiles.slice(i, i + concurrency);
 
-        if (ext && selectedTemplate.extensions.includes(ext)) {
-          const text = await file.text();
-          const cleaned = CoreEngine.cleanCode(text);
-          // push.apply 替代 push(...spread)，避免大型代码库下调用栈溢出（V8 ~125k 参数限制）
+        // 并行读取文件 (I/O) + 并行清洗 (CPU via Worker)
+        const results = await Promise.all(
+          batch.map(file => file.text().then(text => pool.run(text)))
+        );
+
+        for (const cleaned of results) {
+          // push.apply 避免超大数组 spread 栈溢出
           Array.prototype.push.apply(allLines, cleaned);
         }
 
-        if (i % 10 === 0) {
-          setProgress(10 + Math.floor((i / totalFiles) * 80));
-        }
+        setProgress(10 + Math.floor(((i + batch.length) / totalFiles) * 80));
       }
 
       setLineCount(allLines.length);
@@ -171,13 +184,13 @@ export default function Home() {
       setResultBlob(blob);
       setProgress(100);
 
-      setTimeout(() => {
-        setIsProcessing(false);
-      }, 800);
+      setTimeout(() => { setIsProcessing(false); }, 800);
     } catch (err) {
       console.error(err);
       setIsProcessing(false);
       setProgress(0);
+    } finally {
+      pool.terminate(); // 释放所有 Worker 线程
     }
   };
 

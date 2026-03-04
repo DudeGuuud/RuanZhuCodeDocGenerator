@@ -9,18 +9,21 @@ export interface ProjectTemplate {
     excludePatterns: string[];
     /** 预编译的排除路径正则，避免每次过滤文件时重复 includes() 扫描 */
     excludeRegex: RegExp;
+    /** 预构建的扩展名 Set，O(1) hash 查找替代 O(n) includes() */
+    extensionSet: Set<string>;
 }
 
 /** 在模块级预编译，避免 cleanCode 每次调用时重复构造 RegExp 对象 */
 const NEWLINE_RE = /\r?\n/;
 
-function buildTemplate(t: Omit<ProjectTemplate, "excludeRegex">): ProjectTemplate {
+function buildTemplate(t: Omit<ProjectTemplate, "excludeRegex" | "extensionSet">): ProjectTemplate {
     return {
         ...t,
         excludeRegex: new RegExp(
             t.excludePatterns.map(p => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"),
             "i"
         ),
+        extensionSet: new Set(t.extensions),
     };
 }
 
