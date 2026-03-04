@@ -181,7 +181,7 @@ export class CoreEngine {
                                 new Paragraph({
                                     children: [
                                         new TextRun({
-                                            text: `${options.appName} (版本: ${options.appVersion}) - 源代码文档`,
+                                            text: `${options.appName} (版本: ${options.appVersion})`,
                                             size: 18,
                                             color: "666666",
                                         }),
