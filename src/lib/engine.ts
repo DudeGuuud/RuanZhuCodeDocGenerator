@@ -7,49 +7,64 @@ export interface ProjectTemplate {
     framework: string;
     extensions: string[];
     excludePatterns: string[];
+    /** 预编译的排除路径正则，避免每次过滤文件时重复 includes() 扫描 */
+    excludeRegex: RegExp;
+}
+
+/** 在模块级预编译，避免 cleanCode 每次调用时重复构造 RegExp 对象 */
+const NEWLINE_RE = /\r?\n/;
+
+function buildTemplate(t: Omit<ProjectTemplate, "excludeRegex">): ProjectTemplate {
+    return {
+        ...t,
+        excludeRegex: new RegExp(
+            t.excludePatterns.map(p => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"),
+            "i"
+        ),
+    };
 }
 
 export const PROJECT_TEMPLATES: ProjectTemplate[] = [
-    {
+    buildTemplate({
         id: "nextjs",
         name: "Next.js / React (TS/JS)",
         language: "TypeScript/JavaScript",
         framework: "Next.js",
         extensions: ["ts", "tsx", "js", "jsx", "css"],
         excludePatterns: ["node_modules", ".next", "dist", "build", "public"],
-    },
-    {
+    }),
+    buildTemplate({
         id: "springboot",
         name: "Spring Boot / Java",
         language: "Java",
         framework: "Spring Boot",
         extensions: ["java", "xml", "properties", "yml"],
         excludePatterns: ["target", ".mvn", ".idea", "bin"],
-    },
-    {
+    }),
+    buildTemplate({
         id: "python",
         name: "Python (Django/FastAPI)",
         language: "Python",
         framework: "Django/FastAPI",
         extensions: ["py", "html", "css"],
         excludePatterns: ["venv", ".venv", "__pycache__", ".pytest_cache"],
-    },
-    {
+    }),
+    buildTemplate({
         id: "cpp",
         name: "C++ / System",
         language: "C/C++",
         framework: "CMake/Native",
         extensions: ["cpp", "c", "h", "hpp"],
         excludePatterns: ["build", "bin", "obj", "out"],
-    },
-    {
+    }),
+    buildTemplate({
         id: "golang",
         name: "Go / Microservices",
         language: "Go",
         framework: "Standard/Gin",
         extensions: ["go", "mod", "sum"],
         excludePatterns: ["vendor", "bin"],
-    }
+    }),
 ];
 
 export interface CleanOptions {
@@ -61,10 +76,14 @@ export interface CleanOptions {
 
 export class CoreEngine {
     /**
-     * 清洗代码：移除注释和多余空行
+     * 清洗代码：移除注释和多余空行。
+     *
+     * 优化点：
+     * - NEWLINE_RE 在模块级预编译，避免每次 split 重新构造 RegExp
+     * - 块注释的 indexOf 只调用一次，closeIdx 缓存复用，消除二次查找
      */
     static cleanCode(content: string): string[] {
-        const lines = content.split(/\r?\n/);
+        const lines = content.split(NEWLINE_RE);
         const result: string[] = [];
         let inBlockComment = false;
 
@@ -72,12 +91,11 @@ export class CoreEngine {
             const trimmed = line.trim();
             if (!trimmed) continue;
 
-            // 简单的状态机处理块注释
             if (inBlockComment) {
-                if (trimmed.includes("*/")) {
+                const closeIdx = trimmed.indexOf("*/");
+                if (closeIdx !== -1) {
                     inBlockComment = false;
-                    const afterIdx = trimmed.indexOf("*/") + 2;
-                    const remaining = trimmed.substring(afterIdx).trim();
+                    const remaining = trimmed.substring(closeIdx + 2).trim();
                     if (remaining && !remaining.startsWith("//")) {
                         result.push(line.substring(line.indexOf("*/") + 2));
                     }
@@ -86,11 +104,11 @@ export class CoreEngine {
             }
 
             if (trimmed.startsWith("/*")) {
-                if (!trimmed.includes("*/")) {
+                const closeIdx = trimmed.indexOf("*/", 2);
+                if (closeIdx === -1) {
                     inBlockComment = true;
                 } else {
-                    const afterIdx = trimmed.indexOf("*/") + 2;
-                    const remaining = trimmed.substring(afterIdx).trim();
+                    const remaining = trimmed.substring(closeIdx + 2).trim();
                     if (remaining && !remaining.startsWith("//")) {
                         result.push(line.substring(line.indexOf("*/") + 2));
                     }
@@ -101,17 +119,18 @@ export class CoreEngine {
             // 单行注释
             if (trimmed.startsWith("//") || trimmed.startsWith("#")) continue;
 
-            // 行尾注释
+            // 行尾 // 注释（排除 URL 中的 ://）
             if (trimmed.includes("//") && !trimmed.includes("://")) {
-                const idx = line.indexOf("//");
-                const codePart = line.substring(0, idx);
+                const commentIdx = line.indexOf("//");
+                const codePart = line.substring(0, commentIdx);
                 if (codePart.trim()) result.push(codePart);
                 continue;
             }
 
+            // 行尾 # 注释（Python/Shell），避免误触字符串中的 #
             if (trimmed.includes("#") && !line.includes("'#'") && !line.includes('"#"')) {
-                const idx = line.indexOf("#");
-                const codePart = line.substring(0, idx);
+                const commentIdx = line.indexOf("#");
+                const codePart = line.substring(0, commentIdx);
                 if (codePart.trim()) result.push(codePart);
                 continue;
             }
@@ -123,7 +142,10 @@ export class CoreEngine {
     }
 
     /**
-     * 生成 Docx Blob
+     * 生成 Docx Blob。
+     *
+     * 优化：截断逻辑改用 concat 替代 [...front, ...back] spread，
+     * 后者在超大数组时会炸掉调用栈（V8 约 125k 参数限制）。
      */
     static async generateDocx(lines: string[], options: CleanOptions): Promise<Blob> {
         const LINES_PER_PAGE = 50;
@@ -134,7 +156,7 @@ export class CoreEngine {
         if (lines.length > MAX_LINES) {
             const front = lines.slice(0, TARGET_PAGES * LINES_PER_PAGE);
             const back = lines.slice(-TARGET_PAGES * LINES_PER_PAGE);
-            finalLines = [...front, ...back];
+            finalLines = front.concat(back); // 无调用栈限制
         }
 
         const doc = new Document({
@@ -143,7 +165,7 @@ export class CoreEngine {
                     properties: {
                         page: {
                             margin: {
-                                top: 720, // 0.5 inch
+                                top: 720,
                                 bottom: 720,
                                 left: 720,
                                 right: 720,
@@ -157,7 +179,7 @@ export class CoreEngine {
                                     children: [
                                         new TextRun({
                                             text: `${options.appName} (版本: ${options.appVersion}) - 源代码文档`,
-                                            size: 18, // 9pt
+                                            size: 18,
                                             color: "666666",
                                         }),
                                     ],
@@ -188,7 +210,7 @@ export class CoreEngine {
                                     new TextRun({
                                         text: line,
                                         font: "Consolas",
-                                        size: 19, // 9.5pt
+                                        size: 19,
                                     }),
                                 ],
                             })

@@ -141,9 +141,10 @@ export default function Home() {
     try {
       const allLines: string[] = [];
       const fileList = Array.from(files);
-      const filteredFiles = fileList.filter((file) => {
+      const filteredFiles = fileList.filter(file => {
         const path = file.webkitRelativePath.toLowerCase();
-        return !selectedTemplate.excludePatterns.some((pattern) => path.includes(pattern));
+        // 用预编译正则替代 O(Files × Patterns) 的 some+includes 线性扫描
+        return !selectedTemplate.excludeRegex.test(path);
       });
 
       const totalFiles = filteredFiles.length;
@@ -156,7 +157,8 @@ export default function Home() {
         if (ext && selectedTemplate.extensions.includes(ext)) {
           const text = await file.text();
           const cleaned = CoreEngine.cleanCode(text);
-          allLines.push(...cleaned);
+          // push.apply 替代 push(...spread)，避免大型代码库下调用栈溢出（V8 ~125k 参数限制）
+          Array.prototype.push.apply(allLines, cleaned);
         }
 
         if (i % 10 === 0) {
